@@ -258,6 +258,15 @@ CH32X035_DemoBoard/
 
 > 其余通用物料（MOS、TVS、连接器等）可按 `Hardware/Manufacturing/BOM` 中的型号在立创商城等平台查询数据手册。
 
+### AI 辅助创作说明
+
+本项目的代码与文档在创作中大量借助 AI 辅助，并经过人工审阅、修改与实测后发布：
+
+- **软件代码与仓库工程**（固件、构建配置、Git 与发布流程等）：主要由 **GPT** 辅助完成；
+- **文档**（各 README、设计笔记与协议记录等）：主要由 **DeepSeek** 辅助完成。
+
+AI 输出可能存在疏漏或错误，不能替代人工验证；若发现问题，欢迎通过 Issue 指正。
+
 ### 许可证
 
 本项目以 **GNU AGPL-3.0**（GNU Affero General Public License v3.0）授权发布，许可证全文见 [LICENSE](LICENSE)；Copyright (C) 2026 TKWTL。
