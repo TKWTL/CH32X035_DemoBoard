@@ -227,6 +227,7 @@ CH32X035_DemoBoard/
 ├─ Images/                         照片、截图与 README 插图
 ├─ Docs/                           设计笔记、协议笔记与发布文档
 ├─ .gitignore                      构建产物 / IDE 状态忽略规则
+├─ LICENSE                         GNU AGPL-3.0 许可证全文
 └─ README.md
 ```
 
@@ -256,3 +257,9 @@ CH32X035_DemoBoard/
 - [LGS5148（Legend-Si 棱晶半导体）](https://www.legend-si.com/productinfo/990829.html)
 
 > 其余通用物料（MOS、TVS、连接器等）可按 `Hardware/Manufacturing/BOM` 中的型号在立创商城等平台查询数据手册。
+
+### 许可证
+
+本项目以 **GNU AGPL-3.0**（GNU Affero General Public License v3.0）授权发布，许可证全文见 [LICENSE](LICENSE)；Copyright (C) 2026 TKWTL。
+
+AGPL-3.0 是强 copyleft 许可证：如果你修改了本项目的固件或硬件设计，并通过网络向用户提供相应功能（例如将设备联网后对外提供服务），则必须向这些用户提供你所修改版本的完整对应源代码。硬件设计文件（原理图、PCB、Gerber、BOM）随仓库一并按同一许可证提供。
