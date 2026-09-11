@@ -1,0 +1,8 @@
+# 二进制文件：显式声明，避免被 Git 误判为文本而做行尾转换
+# （例如部分 PDF 生成器的输出会被误判；一旦发生行尾转换可能损坏文件）
+*.pdf binary
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.zip binary
+*.epro2 binary

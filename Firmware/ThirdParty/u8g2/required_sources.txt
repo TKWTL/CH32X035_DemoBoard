@@ -1,0 +1,27 @@
+CH32X035 SSD1306 u8g2 renderer subset
+=====================================
+
+Project-local renderer files in ThirdParty/u8g2/csrc/:
+  u8x8.h
+  u8x8_compat.c
+  u8g2_ch32x035_core.c
+  u8g2_ch32x035_hvline.c
+
+Upstream u8g2 files still required:
+  u8g2.h
+  u8g2_font.c
+
+The generic 37 MB u8g2_fonts.c is NOT used by this firmware and is not kept in
+the repository. No stock u8g2 font symbol is referenced anywhere in the code.
+
+The active 6x12 font is supplied separately in:
+  BSP/SSD1306/fonts.c
+  symbol: font_menu_main_h12w6
+
+Font source:
+  TKWTL/Oscilloscope-STM32F103C8T6
+  Application/MiaoUI/fonts/fonts.c
+
+The project-local core implements only R0/full-buffer 128x64 rendering and the
+basic primitives required by this firmware. SSD1306 transport remains the
+asynchronous DMA path in BSP/SSD1306 + Peripheral/I2C.

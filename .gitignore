@@ -1,0 +1,30 @@
+# MounRiver Studio / Eclipse generated local metadata
+.mrs/
+.template
+.settings/
+*.launch
+
+# Build outputs (MRS builds into Firmware/Project/obj)
+# Legacy pre-restructure outputs; safe to delete if they reappear
+/obj/
+/Firmware/obj/
+/Firmware/Project/obj/*
+!/Firmware/Project/obj/.gitkeep
+build/
+*.o
+*.d
+*.elf
+*.hex
+*.bin
+*.map
+*.lst
+*.siz
+*.su
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.tmp
