@@ -5,6 +5,7 @@
 #include "main.h"
 #include "debug.h"
 #include "usart_async.h"
+#include "time_api.h"
 #include "pd.h"
 #include "app_tasks.h"
 #include "ch32x035_it.h"

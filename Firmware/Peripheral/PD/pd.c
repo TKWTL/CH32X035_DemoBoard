@@ -1580,14 +1580,11 @@ static void PD_Main_Proc( )
                     PD_Source_EPR_Capable =
                         (PD_Ctl.Flag.Bit.PD_Version && (pdo1 & (1UL << 23))) ? 1u : 0u;
 
+                    var = PD_Select_Highest_Fixed_PDO();
                     if(var == 0u)
                     {
-                        var = PD_Select_Highest_Fixed_PDO();
-                        if(var == 0u)
-                        {
-                            var = PDO_INDEX_1;
-                            PD_Selected_PDO = var;
-                        }
+                        var = PDO_INDEX_1;
+                        PD_Selected_PDO = var;
                     }
 
 #if PD_EPR_ENABLE
