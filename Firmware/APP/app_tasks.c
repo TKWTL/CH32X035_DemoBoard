@@ -265,18 +265,6 @@ THRD_DECLARE(thread_pd)
     THRD_END;
 }
 
-/* I2C state-machine pump: one O(1) step per scheduler pass. Payload movement
- * is handled by DMA1 CH6/CH7, so this thread never waits on a hardware flag. */
-THRD_DECLARE(thread_i2c_service)
-{
-    THRD_BEGIN;
-    while(1)
-    {
-        I2C_API_Service();
-        THRD_YIELD;
-    }
-    THRD_END;
-}
 
 /* Independent bus watchdog. Normal device NACK is not treated as a stuck bus;
  * timeout/BERR/ARLO/OVR request a peripheral reset + optional 9-clock recovery. */
@@ -577,7 +565,6 @@ THRD_DECLARE(thread_ws2812)
 static const coro_thread_fn_t s_threads[] =
 {
     thread_pd,
-    thread_i2c_service,
     thread_i2c_watchdog,
     thread_ina226,
     thread_ssd1306,
@@ -602,7 +589,7 @@ void APP_Tasks_Init(void)
     I2C_API_Init(INA226_I2C_CLOCK_HZ);
     INA226_Init();
     SSD1306_U8G2_Init();
-    printf("[I2C] I2C1 PA10/PA11 @ 400kHz, DMA1 CH6 TX / CH7 RX; async clients scheduled\r\n");
+    printf("[I2C] I2C1 PA10/PA11 @ 400kHz, DMA1 CH6 TX / CH7 RX; interrupt-driven engine\r\n");
 
     ws_status = WS2812_Init();
     s_ws_ready = (ws_status == 0u) ? 1u : 0u;
@@ -616,13 +603,12 @@ void APP_Tasks_Init(void)
     else
         printf("[WS2812] init failed: status=0x%02x; effect disabled\r\n", ws_status);
 
-    PD_Init();
-    printf("[PD] Sink started; SPR <= %u mV, EPR target %u mV / max %u mA\r\n",
-           (unsigned)PD_REQUEST_MAX_FIXED_MV,
-           (unsigned)PD_EPR_TARGET_MV,
-           (unsigned)PD_EPR_REQUEST_MAX_MA);
+    printf("[PD] Sink started; SPR <= %u mV, EPR target %u mV / request ceiling %u mA\r\n",
+           (unsigned)PD_SPR_MAX_FIXED_MV,
+           (unsigned)PD_EPR_NOMINAL_MV,
+           (unsigned)PD_POLICY_REQUEST_MAX_MA);
     printf("[PD] EPR Sink Operational PDP=%u W; status=PD WAIT, waiting for CC attach\r\n\r\n",
-           (unsigned)PD_EPR_SINK_PDP_W);
+           (unsigned)PD_NOMINAL_PDP_W);
 
     CoroOS_Init(&s_scheduler,
                 s_threads,
@@ -634,4 +620,15 @@ void APP_Tasks_RunOnce(void)
 {
     USART1_Async_Service();
     CoroOS_RunOnce(&s_scheduler);
+}
+
+void APP_Tasks_Idle(void)
+{
+    /* Sleep policy: full speed while USB-PD needs the loop (attached or a
+     * sender-response window); otherwise WFI until the 1 ms SysTick tick or
+     * any peripheral IRQ wakes the core. */
+    if(PD_WantsFastPoll())
+        return;
+
+    __WFI();
 }

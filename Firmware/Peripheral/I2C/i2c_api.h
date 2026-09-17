@@ -83,8 +83,10 @@ typedef struct
  *   DMA1 Channel6 = I2C_TX
  *   DMA1 Channel7 = I2C_RX
  *
- * Transactions are zero-copy. tx/rx buffers must remain valid until the owner
- * consumes the terminal result with I2C_API_TakeResult().
+ * The whole transaction is interrupt-driven (I2C1_EV/ER + DMA1 CH6/CH7);
+ * I2C_API_WatchdogService() is the only foreground call.  Transactions are
+ * zero-copy. tx/rx buffers must remain valid until the owner consumes the
+ * terminal result with I2C_API_TakeResult().
  */
 void I2C_API_Init(uint32_t clock_hz);
 uint32_t I2C_API_GetClockHz(void);
@@ -101,10 +103,9 @@ uint8_t I2C_API_TryWriteRead(I2C_API_Owner owner,
                              uint8_t *rx,
                              uint16_t rx_len);
 
-/* Advance only the I2C peripheral state machine. Never blocks. */
-void I2C_API_Service(void);
-
-/* Run from a separate low-cost coroOS watchdog thread. */
+/* Run from a separate low-cost coroOS watchdog thread.  This is the only
+ * foreground I2C call: it owns timeout detection, bus recovery and the rare
+ * retry of a transaction whose START had to wait for a busy bus. */
 void I2C_API_WatchdogService(uint32_t now_ms);
 
 uint8_t I2C_API_IsBusy(void);
@@ -116,6 +117,12 @@ uint32_t I2C_API_GetRecoveryCount(void);
 I2C_API_Error I2C_API_GetLastError(void);
 const char *I2C_API_GetLastErrorName(void);
 void I2C_API_GetDiagnostic(I2C_API_Diagnostic *diag);
+
+/* Transaction engine handlers; called only by APP/ch32x035_it.c wrappers. */
+void I2C_API_EV_IRQHandler(void);
+void I2C_API_ER_IRQHandler(void);
+void I2C_API_TxDMA_IRQHandler(void);
+void I2C_API_RxDMA_IRQHandler(void);
 
 #ifdef __cplusplus
 }

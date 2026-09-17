@@ -15,6 +15,7 @@
 #include "pd.h"
 #include "pd_port.h"
 
+#define PD_EXT_TYPE_SOURCE_CAP_EXT        0x01U
 #define PD_EXT_TYPE_EXTENDED_CONTROL      0x10U
 #define PD_EXT_TYPE_EPR_SOURCE_CAP        0x11U
 #define PD_EXT_CTRL_EPR_GET_SOURCE_CAP    1U
@@ -33,11 +34,33 @@
 #define PD_EPR_ENTER_TIMEOUT_MS           550U
 #define PD_EPR_KEEPALIVE_PERIOD_MS        375U
 #define PD_EPR_KEEPALIVE_ACK_TIMEOUT_MS   100U
+
+#define PD_SRC_CAP_EXT_TIMEOUT_MS          120U
+#define PD_EPR_ENTER_RETRY_DELAY_MS        120U
 #define PD_VBUS_POWERED_SUPPRESS_HARD_RESET 1U
 #define PD_GET_SOURCE_CAP_RETRY_MS          700U
 #define PD_GET_SOURCE_CAP_MAX_RETRIES       3U
 #define PD_VBUS_DETACH_THRESHOLD_MV         3500U
 #define PD_VBUS_DETACH_DEBOUNCE_COUNT       3U
+
+/* Board request policy.  Keep SPR and EPR voltage domains separate so an
+ * out-of-spec Source_Capabilities message cannot make us request >20 V before
+ * EPR Mode is active.  Current is intentionally relaxed to 7 A for compatible
+ * non-standard sources; the power path, connector and cable must be rated for it.
+ * EPR Enter PDP is selected adaptively from Source_Capabilities_Extended when
+ * available, with a conservative 140 W fallback. */
+#define PD_POLICY_SPR_MAX_FIXED_MV          20000U
+#define PD_POLICY_MAX_REQUEST_MA             7000U
+
+/* Compatibility-mode EPR Enter policy.  The USB-PD specification defines
+ * EPR Sink Operational PDP as a Sink property, not a Source-dependent value.
+ * This product intentionally adapts the Enter PDP to the attached Source to
+ * improve interoperability with non-standard adapters.  The actual power
+ * request remains determined later by the selected EPR Fixed PDO/RDO. */
+#define PD_POLICY_EPR_PDP_FALLBACK_W          140U
+#define PD_POLICY_EPR_PDP_MAX_W               252U  /* 36 V * 7 A policy ceiling */
+#define PD_SOURCE_CAP_EXT_EPR_PDP_OFFSET       24U
+#define PD_SOURCE_CAP_EXT_MIN_SIZE             25U
 
 /* Internal WCH-derived protocol helpers.  Only PD_Init/PD_Task/getters are
  * exported through pd.h. */
@@ -49,7 +72,11 @@ static void PD_Det_Proc(void);
 static void PD_Load_Header(UINT8 ex, UINT8 msg_type);
 static UINT8 PD_Send_Handle(const UINT8 *pbuf, UINT8 len);
 static void PD_Main_Proc(void);
+static void PD_EPR_Fallback(const char *reason);
 static void PD_PDO_Analyse(UINT8 pdo_idx, UINT8 *srccap, UINT16 *current, UINT16 *voltage);
+static UINT32 PD_ReadU32LE(const UINT8 *p);
+static void PD_WriteU32LE(UINT8 *p, UINT32 v);
+
 
 
 
@@ -71,9 +98,10 @@ static __IO UINT8 PD_SourcePDO_Count;
 static UINT8 PD_SourcePDO_Raw[28];
 static __IO UINT8 PD_GetSrcCap_Sent;
 
+
 /* USB PD 3.1 EPR sink state.  The CH32X035 PHY can transport these
  * messages; the WCH USBPD_SNK example does not provide the EPR policy
- * engine, so this file implements the small subset needed for 28V Fixed. */
+ * engine, so this file implements the subset needed for fixed EPR PDOs. */
 static __IO UINT8 PD_Source_EPR_Capable;
 static __IO UINT8 PD_EPR_ModeActive;
 static __IO UINT8 PD_EPR_ContractActive;
@@ -81,14 +109,16 @@ static __IO UINT8 PD_SPR_ContractActive;
 static __IO UINT8 PD_EPR_SourcePDO_Count;
 static UINT8 PD_EPR_SourcePDO_Raw[PD_EPR_CAP_BUFFER_SIZE];
 
-#define EPR_ST_OFF                 0u
-#define EPR_ST_SPR_NEGOTIATING     1u
-#define EPR_ST_WAIT_ENTER_ACK      2u
-#define EPR_ST_WAIT_ENTER_SUCCESS  3u
-#define EPR_ST_WAIT_SOURCE_CAP     4u
-#define EPR_ST_WAIT_REQUEST_ACCEPT 5u
-#define EPR_ST_WAIT_REQUEST_PSRDY  6u
-#define EPR_ST_ACTIVE              7u
+#define EPR_ST_OFF                  0u
+#define EPR_ST_SPR_NEGOTIATING      1u
+#define EPR_ST_WAIT_SRC_CAP_EXT     2u
+#define EPR_ST_WAIT_ENTER_ACK       3u
+#define EPR_ST_WAIT_ENTER_SUCCESS   4u
+#define EPR_ST_WAIT_SOURCE_CAP      5u
+#define EPR_ST_WAIT_REQUEST_ACCEPT  6u
+#define EPR_ST_WAIT_REQUEST_PSRDY   7u
+#define EPR_ST_ACTIVE               8u
+#define EPR_ST_RETRY_ENTER_DELAY    9u
 
 static __IO UINT8  PD_EPR_State;
 static __IO UINT8  PD_SoftResetRecoveryPending;
@@ -97,11 +127,16 @@ static __IO UINT8  PD_EPR_FailedForAttach;
 static __IO UINT8  PD_EPR_GetCapSent;
 static __IO UINT8  PD_EPR_KeepAliveWaitAck;
 static UINT16 PD_EPR_TimerMs;
-static UINT16 PD_EPR_KeepAliveMs;
+/* Shared contract-maintenance clock:
+ * EPR active -> 375 ms EPR KeepAlive; SPR PPS -> 8 s PPS refresh. */
+static UINT16 PD_ContractMaintenanceMs;
 static UINT16 PD_EPR_KeepAliveAckMs;
 static UINT16 PD_EPR_CapDataSize;
 static UINT8  PD_EPR_LastChunk;
 static UINT32 PD_EPR_SelectedRawPDO;
+static UINT8  PD_Source_EPR_PDP_W;
+static UINT8  PD_EPR_EnterPDP_W;
+static UINT8  PD_EPR_EnterRetryUsed;
 
 static uint32_t s_pd_task_last_ms;
 static uint32_t s_pd_detect_last_ms;
@@ -181,6 +216,7 @@ static void PD_PHY_Reset( void )
     PD_Selected_PDO = 0;
     PD_Selected_mV = 0;
     PD_Selected_mA = 0;
+
     PD_SourcePDO_Count = 0;
     PD_GetSrcCap_Sent = 0;
     s_pd_get_src_cap_retries = 0u;
@@ -193,15 +229,19 @@ static void PD_PHY_Reset( void )
     PD_SPR_ContractActive = 0;
     PD_EPR_SourcePDO_Count = 0;
     PD_EPR_State = EPR_ST_OFF;
-    PD_EPR_FailedForAttach = 0;
+    /* PD_EPR_FailedForAttach survives a PHY reset: only a genuine VBUS detach
+     * (PD_Det_Proc) may re-enable EPR for the next attachment. */
     PD_EPR_GetCapSent = 0;
     PD_EPR_KeepAliveWaitAck = 0;
     PD_EPR_TimerMs = 0;
-    PD_EPR_KeepAliveMs = 0;
+    PD_ContractMaintenanceMs = 0;
     PD_EPR_KeepAliveAckMs = 0;
     PD_EPR_CapDataSize = 0;
     PD_EPR_LastChunk = 0;
     PD_EPR_SelectedRawPDO = 0;
+    PD_Source_EPR_PDP_W = 0;
+    PD_EPR_EnterPDP_W = PD_POLICY_EPR_PDP_FALLBACK_W;
+    PD_EPR_EnterRetryUsed = 0;
     PD_SoftResetRecoveryPending = 0;
 }
 
@@ -214,13 +254,31 @@ static void PD_PHY_Reset( void )
  */
 void PD_Init( void )
 {
+    PD_Port_CC initial_cc;
+
     PD_Port_Init(PD_Rx_Buf, sizeof(PD_Rx_Buf));
 
     /* Initialize protocol/policy state. */
     memset(&PD_Ctl.PD_State, 0x00, sizeof(PD_CONTROL));
     Adapter_SrcCap[0] = 1;
     memcpy(&Adapter_SrcCap[1], SrcCap_5V3A_Tab, 4);
+
+    /* A real MCU boot is a new physical power session. */
+    PD_EPR_FailedForAttach = 0u;
     PD_PHY_Reset();
+
+    /* Dead-battery / bus-powered startup: the passive Rd is already visible
+     * before the MCU is alive.  Select the active CC immediately so the first
+     * Source_Capabilities advertisement is not lost while the rest of the
+     * application is still starting. */
+    initial_cc = PD_Port_DetectAttach();
+    if(initial_cc != PD_PORT_CC_NONE)
+    {
+        PD_Port_SelectCC(initial_cc);
+        PD_Ctl.Flag.Bit.Connected = 1u;
+        PD_Ctl.PD_State = STA_SRC_CONNECT;
+    }
+
     PD_Rx_Mode();
     s_pd_task_started = 0u;
     s_pd_task_last_ms = 0u;
@@ -259,9 +317,8 @@ static void PD_Det_Proc( void )
 
     if( PD_Ctl.Flag.Bit.Connected )
     {
-        /* WCH's SNK reference notes that detach should be judged from VBUS
-         * for a bus-powered Sink.  APP feeds the INA226 bus-voltage sample
-         * through PD_SetVbusMillivolts(); keep the policy decision here. */
+        /* Bus-powered Sink: detach is judged from VBUS (the APP feeds the
+         * INA226 sample through PD_SetVbusMillivolts()). */
         if(s_pd_vbus_valid && s_pd_vbus_mv < PD_VBUS_DETACH_THRESHOLD_MV)
         {
             if(s_pd_vbus_detach_count < 0xFFu)
@@ -271,6 +328,9 @@ static void PD_Det_Proc( void )
             {
                 printf("[PD] Disconnect: VBUS=%u mV; clearing contract and re-arming CC detection\r\n",
                        (unsigned)s_pd_vbus_mv);
+                /* This is a genuine physical detach, unlike a Source Hard
+                 * Reset.  The next attachment is allowed one fresh EPR try. */
+                PD_EPR_FailedForAttach = 0u;
                 PD_PHY_Reset();
                 PD_Rx_Mode();
             }
@@ -365,10 +425,8 @@ static void PD_Load_Header( UINT8 ex, UINT8 msg_type )
  */
 static UINT8 PD_Send_Handle( const UINT8 *pbuf, UINT8 len )
 {
-    UINT8  tx_ok;
-    UINT8  cnt;
-    UINT8  is_request;
-    PD_Port_TxDiag tx_diag = {0};
+    UINT8 cnt;
+    UINT8 is_request;
 
     if( ( len % 4 ) != 0 )
     {
@@ -386,71 +444,45 @@ static UINT8 PD_Send_Handle( const UINT8 *pbuf, UINT8 len )
         PD_Tx_Buf[ 2 + cnt ] = pbuf[ cnt ];
     }
 
-    /* An incoming Source message may have arrived immediately after a previous
-     * foreground transaction re-enabled RX.  Never mask USBPD IRQ or start a
-     * new foreground packet until its automatic GoodCRC has physically ended. */
-    if(!PD_Port_WaitAutoAckComplete(1000u))
-    {
-        printf("[PD] TX deferred: auto-GoodCRC still in flight\r\n");
-        return DEF_PD_TX_FAIL;
-    }
-
     is_request = ((PD_Tx_Buf[0] & 0x1Fu) == DEF_TYPE_REQUEST) ? 1u : 0u;
 
-    /* TIMING-CRITICAL: normal SOP TX, RX turnaround and GoodCRC polling are one
-     * atomic PHY transaction. Never insert printf/flush/I2C/scheduler work here.
-     * This matches the known-good C140 3-attempt / 250*3us sequence. */
-    if(PD_Port_TransactSOP(PD_Tx_Buf, (uint8_t)(len + 2u), 3u, &tx_diag))
+    /* Atomic DemoBoard-proven sender path: SOP TX -> TX_END -> RX turnaround
+     * -> matching Source GoodCRC.  No scheduler work / printf / I2C / UI
+     * belongs inside this window. */
+    if(PD_Port_TransactSOP(PD_Tx_Buf, (uint8_t)(len + 2u), 3u))
     {
-        PD_Ctl.Msg_ID += 2;
-        tx_ok = 1u;
-    }
-    else
-    {
-        tx_ok = 0u;
+        /* Retries retain the same Message ID; only an acknowledged transaction
+         * advances the next outbound ID. */
+        PD_Ctl.Msg_ID = (UINT8)((PD_Ctl.Msg_ID + 2u) & 0x0Eu);
+        PD_Rx_Mode();
+        return DEF_PD_TX_OK;
     }
 
     PD_Rx_Mode();
 
-
-    if(tx_ok)
-        return DEF_PD_TX_OK;
-
-    if(is_request)
+    /* Failure diagnostics are deliberately after the timing-critical window. */
     {
-        printf("[PD] failed Request: %02X %02X %02X %02X %02X %02X, MsgID=%u, ack->TX=%lu us, attempts=%u\r\n",
-               PD_Tx_Buf[0], PD_Tx_Buf[1], PD_Tx_Buf[2], PD_Tx_Buf[3],
-               PD_Tx_Buf[4], PD_Tx_Buf[5],
-               (unsigned)((PD_Tx_Buf[1] >> 1) & 0x07u),
-               (unsigned long)tx_diag.ack_to_first_tx_us,
-               (unsigned)tx_diag.attempts);
+        PD_Port_PhyDiag phy;
+        PD_Port_GetPhyDiag(&phy);
+
+        if(is_request)
+        {
+            printf("[PD] failed Request: %02X %02X %02X %02X %02X %02X, MsgID=%u\r\n",
+                   PD_Tx_Buf[0], PD_Tx_Buf[1], PD_Tx_Buf[2], PD_Tx_Buf[3],
+                   PD_Tx_Buf[4], PD_Tx_Buf[5],
+                   (unsigned)((PD_Tx_Buf[1] >> 1) & 0x07u));
+        }
+
+        printf("[PD] TX phy: ST=%02X CNT=%u TO=%u/%u/%u CC%u CFG=%04X\r\n",
+               (unsigned)phy.status, (unsigned)phy.bmc_byte_count,
+               (unsigned)phy.tx_end_timeouts,
+               (unsigned)phy.goodcrc_timeouts,
+               (unsigned)phy.ack_tx_timeouts,
+               (unsigned)phy.selected_cc,
+               (unsigned)phy.config);
     }
 
-    {
-        uint16_t ack_started = 0u;
-        uint16_t ack_completed = 0u;
-        PD_Port_GetAutoAckStats(&ack_started, &ack_completed);
-        printf("[PD] TX diag: auto-GoodCRC started/completed=%u/%u\r\n",
-               (unsigned)ack_started, (unsigned)ack_completed);
-    }
-
-    if(tx_diag.saw_hard_reset)
-    {
-        printf("[PD] TX diag: Source Hard Reset observed during sender-response window\r\n");
-    }
-    else if(tx_diag.saw_frame)
-    {
-        printf("[PD] TX diag: expected GoodCRC, last RX count=%u type=0x%02X stat=0x%02X\r\n",
-               (unsigned)tx_diag.byte_count,
-               (unsigned)tx_diag.message_type,
-               (unsigned)tx_diag.pd_status);
-    }
-    else
-    {
-        printf("[PD] TX diag: no RX frame observed in GoodCRC window\r\n");
-    }
-
-    return( DEF_PD_TX_FAIL );
+    return DEF_PD_TX_FAIL;
 }
 
 /*********************************************************************
@@ -477,12 +509,11 @@ void PDO_Request( UINT8 pdo_index )
 
     PD_PDO_Analyse(pdo_index, &Adapter_SrcCap[1], &Current, &Voltage);
     request_ma = Current;
-    if(request_ma > PD_SPR_REQUEST_MAX_MA) request_ma = PD_SPR_REQUEST_MAX_MA;
+    if(request_ma > PD_POLICY_MAX_REQUEST_MA) request_ma = PD_POLICY_MAX_REQUEST_MA;
 
-    /* Fixed/Variable RDO: Object Position B31:28, No USB Suspend B24,
-     * EPR Mode Capable B22, operating/max current in 10mA units.
-     * We deliberately leave B23=0 so the Source must use chunked Extended
-     * Messages; PD_Rx_Buf is sized for one 26-byte Extended chunk. */
+    /* Fixed RDO: OPOS B31:28, NoUSB Suspend B24, EPR-capable B22, current in
+     * 10 mA units.  B23 stays 0 so Extended replies must use chunked mode
+     * (PD_Rx_Buf holds one 26-byte chunk). */
     rdo = ((UINT32)(pdo_index & 0x0Fu) << 28) | (1UL << 24);
 #if PD_EPR_ENABLE
     if(PD_Source_EPR_Capable && !PD_EPR_FailedForAttach)
@@ -520,8 +551,13 @@ void PDO_Request( UINT8 pdo_index )
     }
     else if(status != DEF_PD_TX_OK)
     {
-        printf("[PD] SPR Request TX/GoodCRC failed; scheduling Soft Reset\r\n");
-        PD_Ctl.PD_State = STA_TX_SOFTRST;
+        /* Cold-plug robustness: a missed GoodCRC must not start a protocol
+         * reset on this VBUS-powered board (the Source could drop VBUS and
+         * brown out the MCU).  Stay attached; the next Source_Capabilities
+         * advertisement retries the Request with a fresh policy pass. */
+        printf("[PD] SPR Request TX/GoodCRC failed; staying attached and waiting for Source retry\r\n");
+        PD_Ctl.PD_State = STA_SRC_CONNECT;
+        PD_Rx_Mode();
     }
 
     PD_Ctl.PD_Comm_Timer = 0;
@@ -558,20 +594,9 @@ static void PD_Save_Adapter_SrcCap( void )
 
     PDO_Len = i;
 
-    /* Modify SrcCap information */
-       /* BIT[31:30] - Fixed Supply */
-       /* BIT29 - Dual-Role Power */
-       /* BIT28 - USB Suspend Power */
-       /* BIT27 - Unconstrained Power */
-       /* BIT26 - USB Communications */
-       /* BIT25 - Dual-Role Data */
-       /* BIT24 - Unchunked Extended Message Supported */
-       /* BIT23 - EPR Mode Capable */
-       /* BIT22 - Reserved,shall be set to zero */
-       /* BIT[21:20] - Peak Current */
-       /* BIT[19:10] - Voltage in 50mV units */
-       /* BIT[9:0] - Maximum Current in 10mA units */
-    /* Keep the received PDO bytes unchanged so printed raw PDO values remain exact. */
+    /* Fixed-PDO bit31:30 supply type, bit23 EPR capable, bit19:10 voltage
+     * (50 mV), bit9:0 current (10 mA).  Raw bytes are kept unchanged for the
+     * terminal dump. */
 
     /* Save the adapter's SrcCap information */
     PD_Rx_Buf[ 1 ] &= 0x8F;
@@ -639,7 +664,7 @@ static UINT8 PD_Select_Highest_Fixed_PDO(void)
         if(supply_type != 0) continue;   /* fixed PDO only */
         mv = (UINT16)(((raw >> 10) & 0x3FFu) * 50u);
         ma = (UINT16)((raw & 0x3FFu) * 10u);
-        if(mv > PD_REQUEST_MAX_FIXED_MV) continue;
+        if(mv > PD_POLICY_SPR_MAX_FIXED_MV) continue;
 
         if((mv > best_mv) || ((mv == best_mv) && (ma > best_ma)))
         {
@@ -660,7 +685,7 @@ static void PD_Print_Source_PDOs(void)
 {
     UINT8 i;
     printf("[PD] Source_Capabilities: %u PDO(s); fixed-request policy max %u mV:\r\n",
-           PD_SourcePDO_Count, (unsigned)PD_REQUEST_MAX_FIXED_MV);
+           PD_SourcePDO_Count, (unsigned)PD_POLICY_SPR_MAX_FIXED_MV);
 
     for(i = 1; i <= PD_SourcePDO_Count; i++)
     {
@@ -782,6 +807,104 @@ static UINT8 PD_Send_EPR_Mode(UINT8 action, UINT8 data)
     return PD_Send_Handle(p, 4);
 }
 
+static UINT8 PD_Choose_EPR_Enter_PDP(UINT8 source_epr_pdp_w)
+{
+    if(source_epr_pdp_w == 0u)
+        return (UINT8)PD_POLICY_EPR_PDP_FALLBACK_W;
+
+    if(source_epr_pdp_w > PD_POLICY_EPR_PDP_MAX_W)
+        return (UINT8)PD_POLICY_EPR_PDP_MAX_W;
+
+    return source_epr_pdp_w;
+}
+
+static void PD_Start_EPR_Enter(UINT8 pdp_w, const char *basis)
+{
+    PD_EPR_EnterPDP_W = pdp_w;
+    PD_EPR_State = EPR_ST_WAIT_ENTER_ACK;
+    PD_EPR_TimerMs = 0u;
+    PD_Ctl.PD_State = STA_IDLE;
+
+    printf("[PD] EPR Mode: sending Enter, Sink PDP=%u W (%s)\r\n",
+           (unsigned)PD_EPR_EnterPDP_W, basis ? basis : "policy");
+
+    if(PD_Send_EPR_Mode(PD_EPR_MODE_ENTER, PD_EPR_EnterPDP_W) != DEF_PD_TX_OK)
+        PD_EPR_Fallback("EPR Mode Enter TX failed");
+}
+
+static void PD_Start_EPR_Enter_Default(const char *reason)
+{
+    PD_Source_EPR_PDP_W = 0u;
+    PD_Start_EPR_Enter((UINT8)PD_POLICY_EPR_PDP_FALLBACK_W, reason);
+}
+
+static void PD_Request_Source_Cap_Extended(void)
+{
+    UINT8 status;
+
+    PD_EPR_State = EPR_ST_WAIT_SRC_CAP_EXT;
+    PD_EPR_TimerMs = 0u;
+    PD_Ctl.PD_State = STA_IDLE;
+
+    PD_Load_Header(0x00, DEF_TYPE_GET_SRC_CAP_EX);
+    status = PD_Send_Handle(NULL, 0);
+    if(status == DEF_PD_TX_OK)
+    {
+        printf("[PD] Get_Source_Cap_Extended sent; selecting adaptive EPR Enter PDP\r\n");
+        PD_EPR_TimerMs = 0u;
+    }
+    else
+    {
+        printf("[PD] Get_Source_Cap_Extended TX failed; using %u W fallback\r\n",
+               (unsigned)PD_POLICY_EPR_PDP_FALLBACK_W);
+        PD_Start_EPR_Enter_Default("Source_Cap_Ext unavailable");
+    }
+}
+
+static void PD_Handle_Source_Capabilities_Extended(void)
+{
+    UINT16 ext_header;
+    UINT16 data_size;
+    UINT8 ndo;
+    UINT8 request_chunk;
+    UINT8 chunk_number;
+    UINT8 available;
+    UINT8 source_pdp;
+
+    if(PD_EPR_State != EPR_ST_WAIT_SRC_CAP_EXT)
+        return;
+
+    ext_header = (UINT16)PD_Rx_Buf[2] | ((UINT16)PD_Rx_Buf[3] << 8);
+    data_size = (UINT16)(ext_header & 0x01FFu);
+    request_chunk = (UINT8)((ext_header >> 10) & 1u);
+    chunk_number = (UINT8)((ext_header >> 11) & 0x0Fu);
+    ndo = (UINT8)((PD_Rx_Buf[1] >> 4) & 0x07u);
+
+    if(request_chunk || chunk_number != 0u || ndo == 0u)
+    {
+        PD_Start_EPR_Enter_Default("invalid Source_Cap_Ext framing");
+        return;
+    }
+
+    available = (UINT8)((UINT16)ndo * 4u - 2u);
+    if(data_size < PD_SOURCE_CAP_EXT_MIN_SIZE ||
+       available <= PD_SOURCE_CAP_EXT_EPR_PDP_OFFSET)
+    {
+        PD_Start_EPR_Enter_Default("Source_Cap_Ext lacks EPR PDP");
+        return;
+    }
+
+    source_pdp = PD_Rx_Buf[4u + PD_SOURCE_CAP_EXT_EPR_PDP_OFFSET];
+    PD_Source_EPR_PDP_W = source_pdp;
+    PD_EPR_EnterPDP_W = PD_Choose_EPR_Enter_PDP(source_pdp);
+
+    printf("[PD] Source_Cap_Ext: EPR Source PDP=%u W -> Enter PDP=%u W\r\n",
+           (unsigned)PD_Source_EPR_PDP_W,
+           (unsigned)PD_EPR_EnterPDP_W);
+
+    PD_Start_EPR_Enter(PD_EPR_EnterPDP_W, "adaptive Source PDP");
+}
+
 static void PD_LocalProtocolRecover(const char *reason)
 {
     PD_ProtocolRecoveryCount++;
@@ -809,7 +932,10 @@ static void PD_EPR_Fallback(const char *reason)
     PD_EPR_GetCapSent = 0;
     PD_EPR_KeepAliveWaitAck = 0;
     PD_EPR_TimerMs = 0;
-    PD_EPR_KeepAliveMs = 0;
+    PD_ContractMaintenanceMs = 0;
+    PD_Source_EPR_PDP_W = 0u;
+    PD_EPR_EnterPDP_W = (UINT8)PD_POLICY_EPR_PDP_FALLBACK_W;
+    PD_EPR_EnterRetryUsed = 0u;
 }
 
 static void PD_EPR_Exit_To_SPR(const char *reason)
@@ -886,37 +1012,64 @@ static void PD_Print_EPR_Source_PDOs(void)
     }
 }
 
-static UINT8 PD_Select_EPR_28V_Fixed(void)
+static UINT8 PD_Select_EPR_Highest_Fixed(void)
 {
     UINT8 i;
-    UINT8 best = 0;
-    UINT16 best_ma = 0;
+    UINT8 best = 0u;
+    UINT16 best_mv = 0u;
+    UINT16 best_ma = 0u;
+    UINT32 best_raw = 0u;
 
-    for(i = 8; i <= PD_EPR_SourcePDO_Count; i++)
+    /* Compatibility policy:
+     *   - fixed PDO only; never select PPS/AVS here
+     *   - EPR target voltage must be >20 V and <=36 V
+     *   - highest voltage wins; same voltage -> highest advertised current
+     *   - scan every slot so non-standard sources that place a >20 V Fixed PDO
+     *     outside the usual EPR slot range can still be used. */
+    for(i = 1u; i <= PD_EPR_SourcePDO_Count; i++)
     {
-        UINT32 raw = PD_ReadU32LE(&PD_EPR_SourcePDO_Raw[(i - 1u) << 2]);
-        if((raw >> 30) == 0)
+        UINT32 raw;
+
+        /* EPR Request object position is four bits; position 0 is invalid. */
+        if(i > 15u) break;
+
+        raw = PD_ReadU32LE(&PD_EPR_SourcePDO_Raw[(i - 1u) << 2]);
+        UINT8 supply_type;
+        UINT16 mv;
+        UINT16 ma;
+
+        if(raw == 0u) continue;
+
+        supply_type = (UINT8)(raw >> 30);
+        if(supply_type != 0u) continue;
+
+        mv = (UINT16)(((raw >> 10) & 0x03FFu) * 50u);
+        ma = (UINT16)((raw & 0x03FFu) * 10u);
+
+        if(mv <= PD_POLICY_SPR_MAX_FIXED_MV) continue;
+        if(mv > PD_POLICY_EPR_MAX_FIXED_MV) continue;
+        if(ma == 0u) continue;
+
+        if((mv > best_mv) || ((mv == best_mv) && (ma > best_ma)))
         {
-            UINT16 mv = (UINT16)(((raw >> 10) & 0x3FFu) * 50u);
-            UINT16 ma = (UINT16)((raw & 0x3FFu) * 10u);
-            if(mv == PD_EPR_TARGET_MV && ma > best_ma)
-            {
-                best = i;
-                best_ma = ma;
-                PD_EPR_SelectedRawPDO = raw;
-            }
+            best = i;
+            best_mv = mv;
+            best_ma = ma;
+            best_raw = raw;
         }
     }
 
-    if(best)
+    if(best != 0u)
     {
         PD_Selected_PDO = best;
-        PD_Selected_mV = PD_EPR_TARGET_MV;
+        PD_Selected_mV = best_mv;
         PD_Selected_mA = best_ma;
-        if(PD_Selected_mA > PD_EPR_REQUEST_MAX_MA)
-            PD_Selected_mA = PD_EPR_REQUEST_MAX_MA;
+        if(PD_Selected_mA > PD_POLICY_MAX_REQUEST_MA)
+            PD_Selected_mA = PD_POLICY_MAX_REQUEST_MA;
+        PD_EPR_SelectedRawPDO = best_raw;
         PD_Ctl.ReqPDO_Idx = best;
     }
+
     return best;
 }
 
@@ -951,7 +1104,7 @@ static void PD_EPR_Capabilities_Complete(void)
     }
 
     PD_EPR_SourcePDO_Count = (UINT8)(PD_EPR_CapDataSize >> 2);
-    target = PD_Select_EPR_28V_Fixed();
+    target = PD_Select_EPR_Highest_Fixed();
 
     /* Print before the EPR_Request.  After transmitting a request, the Source
      * may answer Accept immediately; avoiding printf after TX prevents the
@@ -961,7 +1114,7 @@ static void PD_EPR_Capabilities_Complete(void)
 
     if(target == 0)
     {
-        PD_EPR_Exit_To_SPR("no 28V Fixed PDO");
+        PD_EPR_Exit_To_SPR("no usable EPR Fixed PDO <= 36V");
         return;
     }
 
@@ -1067,7 +1220,11 @@ static void PD_Handle_EPR_Source_Capabilities(void)
 
 static void PD_Handle_Extended_Message(UINT8 msg_type)
 {
-    if(msg_type == PD_EXT_TYPE_EPR_SOURCE_CAP)
+    if(msg_type == PD_EXT_TYPE_SOURCE_CAP_EXT)
+    {
+        PD_Handle_Source_Capabilities_Extended();
+    }
+    else if(msg_type == PD_EXT_TYPE_EPR_SOURCE_CAP)
     {
         PD_EPR_GetCapSent = 1;
         PD_EPR_TimerMs = 0;
@@ -1125,7 +1282,26 @@ static void PD_Handle_EPR_Mode_Message(void)
         else if(data == 3) reason = "EPR-capable bit missing in RDO";
         else if(data == 4) reason = "Source unable to enter EPR now";
         else if(data == 5) reason = "Source PDO not EPR capable";
-        PD_EPR_Fallback(reason);
+
+        /* Compatibility fallback: if an adaptive value above 140 W is rejected
+         * because the Source cannot enter EPR now, retry once at 140 W after a
+         * short delay.  Other failure reasons are not masked by this heuristic. */
+        if(data == 4u &&
+           !PD_EPR_EnterRetryUsed &&
+           PD_EPR_EnterPDP_W > PD_POLICY_EPR_PDP_FALLBACK_W)
+        {
+            PD_EPR_EnterRetryUsed = 1u;
+            PD_EPR_EnterPDP_W = (UINT8)PD_POLICY_EPR_PDP_FALLBACK_W;
+            PD_EPR_State = EPR_ST_RETRY_ENTER_DELAY;
+            PD_EPR_TimerMs = 0u;
+            PD_Ctl.PD_State = STA_IDLE;
+            printf("[PD] EPR Enter Failed (%s); retry once at %u W\r\n",
+                   reason, (unsigned)PD_EPR_EnterPDP_W);
+        }
+        else
+        {
+            PD_EPR_Fallback(reason);
+        }
     }
     else if(action == PD_EPR_MODE_EXIT)
     {
@@ -1149,13 +1325,18 @@ static void PD_Main_Proc( )
     /* Hardware IRQs are terminated inside the BSP and surfaced as events. */
     if(PD_Port_HardResetPending())
     {
+        UINT8 was_epr = (PD_EPR_State != EPR_ST_OFF) ? 1u : 0u;
+
         /* A Hard Reset terminates the whole protocol session.  Do not let a
          * message event captured just before/alongside IF_RX_RESET be parsed
-         * after the session state has been cleared: that can otherwise turn a
-         * stale PS_RDY into a fake PDO0 contract. */
+         * after the session state has been cleared. */
         PD_Port_ClearHardResetEvent();
         PD_Port_ClearMessageEvent();
         printf("[PD] Source Hard Reset received; contract invalid, re-arming Sink\r\n");
+
+        if(was_epr)
+            PD_EPR_FailedForAttach = 1u;
+
         PD_PHY_Reset();
         PD_Rx_Mode();
         return;
@@ -1168,7 +1349,7 @@ static void PD_Main_Proc( )
 
     if(PD_EPR_State == EPR_ST_ACTIVE)
     {
-        PD_EPR_KeepAliveMs = (UINT16)(PD_EPR_KeepAliveMs + Tmr_Ms_Dlt);
+        PD_ContractMaintenanceMs = (UINT16)(PD_ContractMaintenanceMs + Tmr_Ms_Dlt);
         if(PD_EPR_KeepAliveWaitAck)
             PD_EPR_KeepAliveAckMs = (UINT16)(PD_EPR_KeepAliveAckMs + Tmr_Ms_Dlt);
 
@@ -1179,15 +1360,27 @@ static void PD_Main_Proc( )
             PD_EPR_KeepAliveAckMs = 0;
         }
 
-        if(!PD_EPR_KeepAliveWaitAck && PD_EPR_KeepAliveMs >= PD_EPR_KEEPALIVE_PERIOD_MS)
+        if(!PD_EPR_KeepAliveWaitAck && PD_ContractMaintenanceMs >= PD_EPR_KEEPALIVE_PERIOD_MS)
         {
             if(PD_Send_Extended_Control(PD_EXT_CTRL_EPR_KEEPALIVE) == DEF_PD_TX_OK)
             {
                 PD_EPR_KeepAliveWaitAck = 1;
-                PD_EPR_KeepAliveMs = 0;
+                PD_ContractMaintenanceMs = 0;
                 PD_EPR_KeepAliveAckMs = 0;
             }
         }
+    }
+    else if(PD_EPR_State == EPR_ST_WAIT_SRC_CAP_EXT &&
+            PD_EPR_TimerMs > PD_SRC_CAP_EXT_TIMEOUT_MS)
+    {
+        printf("[PD] Source_Capabilities_Extended timeout; using %u W fallback\r\n",
+               (unsigned)PD_POLICY_EPR_PDP_FALLBACK_W);
+        PD_Start_EPR_Enter_Default("Source_Cap_Ext timeout");
+    }
+    else if(PD_EPR_State == EPR_ST_RETRY_ENTER_DELAY &&
+            PD_EPR_TimerMs >= PD_EPR_ENTER_RETRY_DELAY_MS)
+    {
+        PD_Start_EPR_Enter(PD_EPR_EnterPDP_W, "140W compatibility retry");
     }
     else if((PD_EPR_State == EPR_ST_WAIT_ENTER_ACK ||
              PD_EPR_State == EPR_ST_WAIT_ENTER_SUCCESS) &&
@@ -1226,11 +1419,8 @@ static void PD_Main_Proc( )
         case STA_SRC_CONNECT:
             PD_Ctl.PD_Comm_Timer += Tmr_Ms_Dlt;
 
-            /* A Source normally sends Source_Capabilities after Attach.  If
-             * our PHY joined late (for example after holding RST), explicitly
-             * ask for them.  Previous code only tried once, then called
-             * PD_PHY_Reset() without clearing Connected, which could leave the
-             * state machine permanently stuck in STA_IDLE. */
+            /* A Source normally sends Source_Capabilities after attach; ask
+             * explicitly if it did not (bounded retries, then re-arm). */
             if(PD_Ctl.PD_Comm_Timer >= PD_GET_SOURCE_CAP_RETRY_MS)
             {
                 if(s_pd_get_src_cap_retries < PD_GET_SOURCE_CAP_MAX_RETRIES)
@@ -1352,6 +1542,34 @@ static void PD_Main_Proc( )
                 case DEF_TYPE_SRC_CAP:
                 {
                     UINT32 pdo1;
+
+                    /* Fresh Source_Capabilities during EPR entry = the Source
+                     * restarted its SPR sequence; abort only the in-progress
+                     * EPR entry and process it normally (the next SPR PS_RDY
+                     * starts a fresh Enter attempt). */
+                    if((PD_EPR_State == EPR_ST_WAIT_SRC_CAP_EXT) ||
+                       (PD_EPR_State == EPR_ST_WAIT_ENTER_ACK) ||
+                       (PD_EPR_State == EPR_ST_WAIT_ENTER_SUCCESS) ||
+                       (PD_EPR_State == EPR_ST_RETRY_ENTER_DELAY))
+                    {
+                        printf("[PD] Source restarted Source_Capabilities during EPR entry; re-establishing SPR\r\n");
+                        PD_EPR_ModeActive = 0u;
+                        PD_EPR_ContractActive = 0u;
+                        PD_EPR_GetCapSent = 0u;
+                        PD_EPR_KeepAliveWaitAck = 0u;
+                        PD_EPR_State = EPR_ST_OFF;
+                        PD_EPR_TimerMs = 0u;
+                    }
+                    else if(PD_EPR_State >= EPR_ST_WAIT_SOURCE_CAP)
+                    {
+                        /* Both sides are already in EPR mode: an ordinary SPR
+                         * Source_Capabilities must not overwrite the active
+                         * EPR policy transaction. */
+                        printf("[PD] Source_Capabilities ignored during active EPR state %u\r\n",
+                               (unsigned)PD_EPR_State);
+                        break;
+                    }
+
                     PD_GetSrcCap_Sent = 1;
                     s_pd_get_src_cap_retries = 0u;
                     Delay_Ms(5);
@@ -1362,17 +1580,28 @@ static void PD_Main_Proc( )
                     PD_Source_EPR_Capable =
                         (PD_Ctl.Flag.Bit.PD_Version && (pdo1 & (1UL << 23))) ? 1u : 0u;
 
-                    var = PD_Select_Highest_Fixed_PDO();
-                    if(var == 0)
+                    if(var == 0u)
                     {
-                        var = PDO_INDEX_1;
-                        PD_Selected_PDO = var;
+                        var = PD_Select_Highest_Fixed_PDO();
+                        if(var == 0u)
+                        {
+                            var = PDO_INDEX_1;
+                            PD_Selected_PDO = var;
+                        }
                     }
 
 #if PD_EPR_ENABLE
                     if(PD_Source_EPR_Capable && !PD_EPR_FailedForAttach)
                     {
                         PD_EPR_State = EPR_ST_SPR_NEGOTIATING;
+                        PD_EPR_TimerMs = 0;
+                    }
+                    else if(PD_EPR_State == EPR_ST_SPR_NEGOTIATING)
+                    {
+                        /* Do not carry a stale "about to enter EPR" state
+                         * across a fresh Source_Capabilities advertisement
+                         * that no longer advertises EPR. */
+                        PD_EPR_State = EPR_ST_OFF;
                         PD_EPR_TimerMs = 0;
                     }
 #endif
@@ -1440,8 +1669,9 @@ static void PD_Main_Proc( )
                     }
                     else if(PD_EPR_State == EPR_ST_WAIT_REQUEST_ACCEPT)
                     {
-                        PD_EPR_Exit_To_SPR("28V EPR_Request rejected");
+                        PD_EPR_Exit_To_SPR("EPR Fixed Request rejected");
                     }
+
                     else
                     {
                         PD_Ctl.PD_State = STA_IDLE;
@@ -1467,18 +1697,19 @@ static void PD_Main_Proc( )
                     }
 
                     PD_ProtocolRecoveryCount = 0u;
+
                     if(PD_EPR_State == EPR_ST_SPR_NEGOTIATING)
                     {
                         PD_SPR_ContractActive = 1;
                         printf("[PD] SPR contract ready: PDO%u, %u mV / %u mA\r\n",
                                PD_Selected_PDO, PD_Selected_mV, PD_Selected_mA);
-                        printf("[PD] EPR Mode: sending Enter, Sink PDP=%u W\r\n",
-                               (unsigned)PD_EPR_SINK_PDP_W);
-                        PD_EPR_State = EPR_ST_WAIT_ENTER_ACK;
-                        PD_EPR_TimerMs = 0;
-                        PD_Ctl.PD_State = STA_IDLE;
-                        if(PD_Send_EPR_Mode(PD_EPR_MODE_ENTER, (UINT8)PD_EPR_SINK_PDP_W) != DEF_PD_TX_OK)
-                            PD_EPR_Fallback("EPR Mode Enter TX failed");
+
+                        /* Before EPR Entry, try to read the Source's extended
+                         * capability block.  Its byte 24 carries EPR Source PDP.
+                         * Compatibility mode adapts our Enter PDP to that rating;
+                         * failure to obtain it falls back to 140 W. */
+                        PD_EPR_EnterRetryUsed = 0u;
+                        PD_Request_Source_Cap_Extended();
                     }
                     else if(PD_EPR_State == EPR_ST_WAIT_REQUEST_PSRDY)
                     {
@@ -1487,7 +1718,7 @@ static void PD_Main_Proc( )
                         PD_EPR_ModeActive = 1;
                         PD_EPR_State = EPR_ST_ACTIVE;
                         PD_EPR_TimerMs = 0;
-                        PD_EPR_KeepAliveMs = 0;
+                        PD_ContractMaintenanceMs = 0;
                         PD_EPR_KeepAliveWaitAck = 0;
                         PD_Ctl.PD_State = STA_IDLE;
                         printf("[PD] EPR contract ready: PDO%u, %u mV / %u mA\r\n",
@@ -1522,6 +1753,7 @@ static void PD_Main_Proc( )
                         printf("[PD] WAIT to EPR_Request is a protocol error; Hard Reset\r\n");
                         PD_Ctl.PD_State = STA_TX_HRST;
                     }
+
                     else
                     {
                         /* For the normal SPR Request, drop the pending transaction
@@ -1536,9 +1768,17 @@ static void PD_Main_Proc( )
                     break;
 
                 case DEF_TYPE_NOT_SUPPORT:
-                    if(PD_EPR_State == EPR_ST_WAIT_ENTER_ACK ||
-                       PD_EPR_State == EPR_ST_WAIT_ENTER_SUCCESS)
+                    if(PD_EPR_State == EPR_ST_WAIT_SRC_CAP_EXT)
+                    {
+                        printf("[PD] Source_Capabilities_Extended not supported; using %u W fallback\r\n",
+                               (unsigned)PD_POLICY_EPR_PDP_FALLBACK_W);
+                        PD_Start_EPR_Enter_Default("Source_Cap_Ext Not_Supported");
+                    }
+                    else if(PD_EPR_State == EPR_ST_WAIT_ENTER_ACK ||
+                            PD_EPR_State == EPR_ST_WAIT_ENTER_SUCCESS)
+                    {
                         PD_EPR_Fallback("EPR Mode not supported by Source");
+                    }
                     break;
 
                 case DEF_TYPE_GET_SNK_CAP:
@@ -1583,9 +1823,8 @@ static void PD_Main_Proc( )
             }
         }
 
-        /* Re-arm RX only when there is neither a completed packet waiting nor
-         * an automatic GoodCRC still on the wire.  The latter is the narrow
-         * race that produced diagnostics such as started/completed=6/5. */
+        /* Re-arm RX only when no packet is queued and no automatic GoodCRC is
+         * still on the wire. */
         if(!PD_Port_MessagePending() && !PD_Port_AutoAckBusy())
             PD_Rx_Mode();
         PD_Ctl.PD_BusIdle_Timer = 0;
@@ -1648,9 +1887,8 @@ uint8_t PD_IsPowerReady(void)
         return 0u;
 
 #if PD_EPR_ENABLE
-    /* Keep nonessential loads off while an EPR-capable source is moving from
-     * the stable SPR contract into the final EPR contract.  If EPR entry
-     * fails, PD_EPR_FailedForAttach makes the existing SPR contract usable. */
+    /* Report "ready" only for the final contract while an EPR-capable source
+     * moves SPR -> EPR; if entry fails, the SPR contract becomes usable. */
     if(PD_Source_EPR_Capable && !PD_EPR_FailedForAttach)
         return PD_EPR_ContractActive ? 1u : 0u;
 #endif
@@ -1666,6 +1904,16 @@ uint16_t PD_GetContractVoltageMv(void)
 uint16_t PD_GetContractCurrentMa(void)
 {
     return PD_Selected_mA;
+}
+
+uint8_t PD_WantsFastPoll(void)
+{
+    /* Sender-response timing is tighter than the idle cadence: never sleep
+     * while attached or while the PHY / auto-GoodCRC owns the wire. */
+    if(PD_IsConnected() || PD_Port_TxBusy())
+        return 1u;
+
+    return PD_Port_AutoAckBusy();
 }
 
 static UINT8 PD_DecodeDisplayPDO(UINT32 raw,

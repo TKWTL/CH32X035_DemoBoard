@@ -3,5 +3,6 @@
 
 void APP_Tasks_Init(void);
 void APP_Tasks_RunOnce(void);
+void APP_Tasks_Idle(void);
 
 #endif /* APP_TASKS_H_ */

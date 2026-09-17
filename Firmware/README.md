@@ -7,10 +7,10 @@
 ## 当前固件特性
 
 - CH32X035C8T6 USB-PD 受电端（Sink）。
-- SPR 协商最高至 20 V；当供电源（Source）支持时，进入 PD 3.1 EPR 并请求 28 V 固定 EPR 电压。
+- SPR 协商最高至 20 V；当供电源（Source）支持时，进入 PD 3.1 EPR 并请求最高可用的固定 EPR 电压（默认目标 28 V；上限宏允许提升至 36 V）。
 - 在已验证的 28 V 路径上每 375 ms 发送一次 EPR KeepAlive。
 - 通过共享的 I2C1（400 kHz）读取 INA226 总线/分流电压电流。
-- 协作式异步 I2C 状态机：TX 使用 DMA1 CH6、RX 使用 DMA1 CH7，并带基于进度的超时/恢复机制。
+- 中断驱动 I2C 事务引擎：TX 使用 DMA1 CH6、RX 使用 DMA1 CH7；I2C1 事件/错误中断推进状态机，前台仅保留看门狗做超时/恢复。
 - SSD1306 128x64 仪表盘，支持热插拔检测，使用 MiaoUI 6x12 字体数据。
 - 供电源 PDO 仪表盘；显示的 PDO 数值由收到的 Source 数据解码，与 Sink 请求电流策略相互独立。
 - 四颗 WS2812 LED 由 CH32X035 PIOC 驱动：4 ms 刷新、Q8.8 内部颜色值，以及用于平滑渐变的时域误差扩散。
@@ -70,9 +70,9 @@ Firmware/
 │  └─ SSD1306/            u8g2 渲染器 + 异步 I2C/DMA SSD1306 传输
 ├─ Peripheral/
 │  ├─ PD/                 Sink 策略/协议 + CH32X035 原子 PHY 端口 + 调试笔记
-│  ├─ I2C/                I2C1 400 kHz 异步状态机 + DMA1 CH6/CH7 + 恢复
+│  ├─ I2C/                I2C1 400 kHz 中断驱动事务引擎 + DMA1 CH6/CH7 + 恢复
 │  ├─ PIOC/               PC7 RGB 码流运行时
-│  ├─ Time/               自由运行 64 位 SysTick 时基
+│  ├─ Time/               SysTick 自由运行µs计数器 + 1 ms 节拍中断
 │  └─ USART/              USART1 DMA 异步 TX/RX API，各 256 B
 ├─ Project/              底层 MCU/工具链支持
 │  ├─ Core/               青稞内核 + WCH 标准外设库
@@ -95,13 +95,13 @@ Firmware/
 注册顺序：
 
 1. PD 协议任务 —— 每次调度轮次运行一次。
-2. I2C 服务 —— 每轮推进一个非阻塞 I2C/DMA 状态。
-3. I2C 看门狗 —— 每 10 ms 检查一次，仅在超时/总线故障时执行总线恢复。
-4. INA226 —— 异步寄存器读取；VBUS 每 50 ms 更新一次，忙时让出。
-5. SSD1306 —— 热插拔探测/初始化/全缓冲 DMA 刷新，独立于 PD 状态运行。
-6. WS2812 灯效 —— 4 ms 物理刷新并带时域抖动（dithering），仅在 PD 合同稳定后启用。
+2. I2C 看门狗 —— 每 10 ms 检查一次，仅在超时/总线故障时执行总线恢复；事务全程
+   由中断推进，不再占用调度线程。
+3. INA226 —— 异步寄存器读取；VBUS 每 50 ms 更新一次，忙时让出。
+4. SSD1306 —— 热插拔探测/初始化/全缓冲 DMA 刷新，独立于 PD 状态运行。
+5. WS2812 灯效 —— 4 ms 物理刷新并带时域抖动（dithering），仅在 PD 合同稳定后启用。
 
-`THRD_DELAY()` 使用自由运行 SysTick API 的 `TIME_Millis()`；没有引入调度器节拍中断。跨越让出点后必须保留的值，必须声明为 `static` 或存放在线程函数之外。
+`THRD_DELAY()` 使用自由运行 SysTick API 的 `TIME_Millis()`；毫秒计数由 1 ms SysTick 节拍中断维护，主循环空闲时进入 WFI 休眠。跨越让出点后必须保留的值，必须声明为 `static` 或存放在线程函数之外。
 
 ## USART1 异步流
 
@@ -134,7 +134,7 @@ INA226 与 SSD1306 共用同一条 I2C1 总线（PA10/PA11，400 kHz）。总线
 
 ## USB-PD 受电端分层
 
-`Peripheral/PD/pd.c` 负责 Sink 协议/策略状态：SPR 选择、EPR 进入、28 V 请求、KeepAlive、超时/恢复与合同状态。它不直接接触 CH32X035 USBPD 寄存器。
+`Peripheral/PD/pd.c` 负责 Sink 协议/策略状态：SPR/EPR 固定挡位选择（EPR 上限宏允许提升至 36 V）、自适应 Enter PDP 的 EPR 进入、KeepAlive、超时/恢复与合同状态。它不直接接触 CH32X035 USBPD 寄存器。
 
 `Peripheral/PD/pd_port.c` 是 MCU 相关的 PHY/CC 后端。唯一刻意保持原子的普通消息操作是 `PD_Port_TransactSOP()`：前台 SOP 发送、立即 RX 换向与 GoodCRC 轮询都留在同一函数内，因为此前拆开它们曾让日志/调度延迟破坏 USB-PD 时序。自动 GoodCRC 在 USBPD ISR 内完成，之后收到的报文才交给策略层。Hard Reset 有独立的端口 API。
 

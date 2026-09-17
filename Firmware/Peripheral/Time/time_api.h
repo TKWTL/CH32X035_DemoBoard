@@ -7,10 +7,17 @@
 extern "C" {
 #endif
 
-/* Free-running 64-bit CH32X035 SysTick timebase.
- * Clock source: HCLK/8. No interrupt and no compare/reload are used.
+/* CH32X035 SysTick timebase.
+ *
+ * Clock source: HCLK/8 (48 MHz core -> 6 MHz counter).  The hardware counter
+ * keeps free-running so the microsecond APIs stay tick-accurate, while a
+ * compare interrupt every 1 ms maintains a software millisecond counter that
+ * TIME_Millis() returns.  The handler body is TIME_TickHandler(); the
+ * application vector table calls it from SysTick_Handler().
+ *
  * This API is shared by drivers, protocol engines and debug delays. */
 void TIME_Init(void);
+void TIME_TickHandler(void);
 uint32_t TIME_Ticks32(void);
 uint64_t TIME_Ticks64(void);
 uint32_t TIME_Millis(void);
