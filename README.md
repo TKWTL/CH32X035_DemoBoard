@@ -6,7 +6,7 @@
 
 - **主控**：CH32X035C8T6 —— 青稞 RISC-V4C 核，最高 48 MHz，62 KB Flash / 20 KB SRAM。
 - **USB 通信**：Type-C 接口的 D+/D- 接入 MCU 内置 USB 2.0 全速控制器及 PHY，可做 USB Device / Host 实验。
-- **USB-PD 通信**：CC1/CC2（PC14/PC15）经板载 PD 前端接入 USBPD PHY，固件实现 Sink 受电应用；**最大支持 28 V PD 电压**（EPR 固定电压挡）。
+- **USB-PD 通信**：CC1/CC2（PC14/PC15）经板载 PD 前端接入 USBPD PHY，固件实现 Sink 受电应用；**最大支持 28 V PD 电压**（EPR 固定电压挡；升级到 36 V 挡位的方法见「更新说明」）。
 - **可选下拉**：CC 上的 5.1 kΩ Rd 网络可选择接入/断开，由 `#CCPD`（PB2，低有效）控制，方便在纯 USB 实验与 PD Sink 实验之间切换形态。
 - **USBPD 降压电源**：将协商得到的 VBUS（最高 28 V）降压为整板系统电源；全板由 PD 源供电，无需额外电源即可运行。
 - **接口保护**：VBUS、CC、USB 数据线均带接口保护电路，提升热插拔与异常供电源场景下的可靠性。
@@ -239,6 +239,19 @@ CH32X035_DemoBoard/
 ### 状态
 
 已验证的固件路径包括 SPR 20 V、EPR Mode 进入、EPR Source Capabilities 解析、固定 28 V / 5 A 请求、INA226 遥测、SSD1306 仪表盘与 WS2812 灯效。硬件行为仍取决于所接供电源、板卡跳线与具体板卡版本，因此发布标签应记录匹配的硬件版本与测试条件。
+
+### 更新说明
+
+**2026-09-17 — 固件升级：通信中断化、时基与 USB-PD 状态机**
+
+- **通信外设全面中断化**：I2C1 改为全中断驱动事务引擎（`I2C1_EV/ER` + `DMA1 CH6/CH7` 完成中断推进，前台仅保留 10 ms 看门狗做超时/总线恢复）；USART1 保持 DMA + 完成中断路径。不再有轮询等待完成的通信循环。
+- **时基升级**：SysTick 增加 1 ms 比较中断与软件毫秒计数（`TIME_Millis()` 不再做 64 位除法）；自由运行计数器继续提供 µs 级计时与延时。
+- **中断基建**：`APP_IRQ_Init()` 统一维护优先级表（USBPD 独占抢占 0 级，其余为 1 级，最坏嵌套 2 级匹配 V4C 硬件压栈）并使用 **VTF 免表中断入口**（USBPD / USART TX / USART RX / I2C1 事件）；全部中断服务函数按硬件压栈方式声明。
+- **USB-PD 状态机升级**（仍为固定挡位，不申请 PPS）：EPR 进入前读取 `Source_Capabilities_Extended` 自适应 Enter PDP（140 W 兜底、被拒重试一次）；上电即选 CC 防止丢首包；重试不递增 Message ID；SPR 请求失败不再触发 Soft Reset。
+- **请求策略**：最大请求电流提升至 **7 A**；EPR 固定电压请求上限宏默认 **28 V**。
+- **空闲策略**：主循环空闲且 PD 未附着时进入 WFI 休眠；PD 附着或处于发送-响应窗口时保持全速。
+
+> **升级到 36 V 挡位**：仅需两步——① 硬件将 VBUS 保护 TVS **D2 由 SMAJ28A 更换为 SMAJ36A**；② 固件将 `Firmware/Peripheral/PD/pd.h` 中 `PD_POLICY_EPR_MAX_FIXED_MV` 由 `28000U` 改为 `36000U`。按本设计选型，其余无需改动。
 
 ### 参考文档
 

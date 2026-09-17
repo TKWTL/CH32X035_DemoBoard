@@ -35,3 +35,4 @@ Hardware/
 
 - 焊接建议：先完成电源部分并验证，再焊主控与外设；Type-C 母座与芯片注意方向；上电前先确认无电源短路。
 - 板卡照片与实机显示截图在 `../Images/`；引脚/跳线/连接器对照见 `../Firmware/README.md` 的「板级接口与引脚映射」。
+- **36 V 挡位改动**：将 VBUS 保护 TVS **D2** 由 SMAJ28A 更换为 SMAJ36A，并将固件 EPR 上限宏 `PD_POLICY_EPR_MAX_FIXED_MV` 调至 `36000U`（详见仓库根 README「更新说明」）。
