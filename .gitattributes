@@ -6,3 +6,6 @@
 *.png binary
 *.zip binary
 *.epro2 binary
+
+# 交互式 BOM（生成型 HTML 导出，约 12.6 MB）：不做文本 diff、不计入语言统计
+Hardware/Manufacturing/BOM/InteractiveBOM_*.html -diff linguist-vendored linguist-generated

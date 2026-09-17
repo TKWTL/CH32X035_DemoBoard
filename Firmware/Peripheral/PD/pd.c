@@ -58,7 +58,7 @@
  * improve interoperability with non-standard adapters.  The actual power
  * request remains determined later by the selected EPR Fixed PDO/RDO. */
 #define PD_POLICY_EPR_PDP_FALLBACK_W          140U
-#define PD_POLICY_EPR_PDP_MAX_W               252U  /* 36 V * 7 A policy ceiling */
+#define PD_POLICY_EPR_PDP_MAX_W               196U  /* 28 V * 7 A policy ceiling (raise with the voltage ceiling) */
 #define PD_SOURCE_CAP_EXT_EPR_PDP_OFFSET       24U
 #define PD_SOURCE_CAP_EXT_MIN_SIZE             25U
 
@@ -1022,7 +1022,7 @@ static UINT8 PD_Select_EPR_Highest_Fixed(void)
 
     /* Compatibility policy:
      *   - fixed PDO only; never select PPS/AVS here
-     *   - EPR target voltage must be >20 V and <=36 V
+     *   - EPR target voltage must be >20 V and <= the policy ceiling
      *   - highest voltage wins; same voltage -> highest advertised current
      *   - scan every slot so non-standard sources that place a >20 V Fixed PDO
      *     outside the usual EPR slot range can still be used. */
@@ -1114,7 +1114,7 @@ static void PD_EPR_Capabilities_Complete(void)
 
     if(target == 0)
     {
-        PD_EPR_Exit_To_SPR("no usable EPR Fixed PDO <= 36V");
+        PD_EPR_Exit_To_SPR("no usable EPR Fixed PDO within request ceiling");
         return;
     }
 

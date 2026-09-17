@@ -221,7 +221,7 @@ CH32X035_DemoBoard/
 │  ├─ Preview/                     原理图 / PCB PDF 与网表
 │  ├─ Manufacturing/               生产文件
 │  │  ├─ Gerber/                   二层版 / 四层版 Gerber 包
-│  │  ├─ BOM/                      BOM（CSV）
+│  │  ├─ BOM/                      BOM（CSV）与交互式 BOM HTML
 │  │  └─ CPL/                      贴片坐标（PickAndPlace CSV）
 │  └─ README.md
 ├─ Images/                         照片、截图与 README 插图

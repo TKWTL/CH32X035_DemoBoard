@@ -7,7 +7,7 @@
 ## 当前固件特性
 
 - CH32X035C8T6 USB-PD 受电端（Sink）。
-- SPR 协商最高至 20 V；当供电源（Source）支持时，进入 PD 3.1 EPR 并请求最高可用的固定 EPR 电压（默认目标 28 V；上限宏允许提升至 36 V）。
+- SPR 协商最高至 20 V；当供电源（Source）支持时，进入 PD 3.1 EPR 并请求最高可用的固定 EPR 电压（默认上限 28 V；将 EPR 上限宏改为 36000 可允许请求至 36 V）。
 - 在已验证的 28 V 路径上每 375 ms 发送一次 EPR KeepAlive。
 - 通过共享的 I2C1（400 kHz）读取 INA226 总线/分流电压电流。
 - 中断驱动 I2C 事务引擎：TX 使用 DMA1 CH6、RX 使用 DMA1 CH7；I2C1 事件/错误中断推进状态机，前台仅保留看门狗做超时/恢复。
@@ -134,7 +134,7 @@ INA226 与 SSD1306 共用同一条 I2C1 总线（PA10/PA11，400 kHz）。总线
 
 ## USB-PD 受电端分层
 
-`Peripheral/PD/pd.c` 负责 Sink 协议/策略状态：SPR/EPR 固定挡位选择（EPR 上限宏允许提升至 36 V）、自适应 Enter PDP 的 EPR 进入、KeepAlive、超时/恢复与合同状态。它不直接接触 CH32X035 USBPD 寄存器。
+`Peripheral/PD/pd.c` 负责 Sink 协议/策略状态：SPR/EPR 固定挡位选择（EPR 上限宏默认 28 V，可按需调至 36 V）、自适应 Enter PDP 的 EPR 进入、KeepAlive、超时/恢复与合同状态。它不直接接触 CH32X035 USBPD 寄存器。
 
 `Peripheral/PD/pd_port.c` 是 MCU 相关的 PHY/CC 后端。唯一刻意保持原子的普通消息操作是 `PD_Port_TransactSOP()`：前台 SOP 发送、立即 RX 换向与 GoodCRC 轮询都留在同一函数内，因为此前拆开它们曾让日志/调度延迟破坏 USB-PD 时序。自动 GoodCRC 在 USBPD ISR 内完成，之后收到的报文才交给策略层。Hard Reset 有独立的端口 API。
 

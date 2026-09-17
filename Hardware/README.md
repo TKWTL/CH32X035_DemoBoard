@@ -17,7 +17,8 @@ Hardware/
 │  │  ├─ Gerber_CH32X035_DemoBoard_二层版.zip
 │  │  └─ Gerber_CH32X035_DemoBoard_四层版.zip
 │  ├─ BOM/
-│  │  └─ BOM_CH32X035_DemoBoard.csv
+│  │  ├─ BOM_CH32X035_DemoBoard.csv
+│  │  └─ InteractiveBOM_CH32X035_DemoBoard.html   交互式 BOM（浏览器打开，点选定位）
 │  └─ CPL/
 │     └─ PickAndPlace_CH32X035_DemoBoard.csv
 └─ README.md
@@ -28,6 +29,7 @@ Hardware/
 1. **打样**：按需选择 **二层版** 或 **四层版** Gerber 包（含钻孔文件），解压后整体打包给板厂（嘉立创、捷配等）。
 2. **配单**：按 `Manufacturing/BOM/BOM_CH32X035_DemoBoard.csv` 采购物料。
 3. **贴片**：SMT 可直接使用 `Manufacturing/CPL/PickAndPlace_CH32X035_DemoBoard.csv`（贴片坐标/器件位号）。
+4. **交互式 BOM**：浏览器打开 `Manufacturing/BOM/InteractiveBOM_CH32X035_DemoBoard.html`，可在 PCB 视图上点选/高亮元件与位号。
 
 ## 备注
 

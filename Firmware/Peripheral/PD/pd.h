@@ -17,9 +17,10 @@ extern "C" {
 #define PD_NOMINAL_REQUEST_MA            5000U   /* nominal contract current */
 #define PD_POLICY_REQUEST_MAX_MA         7000U   /* adaptive current ceiling (pd.c) */
 /* Request-strategy ceiling: the highest EPR Fixed voltage this board may ask
- * for (raised to 36 V; the Desktop reference uses 32 V).  Actual requests are
- * always clamped to what the attached Source advertises. */
-#define PD_POLICY_EPR_MAX_FIXED_MV      36000U   /* adaptive EPR voltage ceiling */
+ * for.  Default 28 V; change this single line to 36000U to allow requesting
+ * up to 36 V.  Actual requests are always clamped to what the Source
+ * advertises. */
+#define PD_POLICY_EPR_MAX_FIXED_MV      28000U   /* adaptive EPR voltage ceiling */
 #define PD_NOMINAL_PDP_W                  140U   /* nominal Sink PDP */
 #define PD_EPR_ENABLE                      1U
 
