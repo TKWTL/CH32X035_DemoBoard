@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="Images/合照.jpg" alt="CH32X035 DemoBoard 板卡合照" width="720">
+</p>
+
 # CH32X035 USB-PD EPR 开发板
 
 本项目是一块主要用于 **CH32X035** 开发与评估的定制板卡，以 **CH32X035C8T6**（LQFP48）为基准设计：围绕 USB 与 USB-PD 两条主线，板载完整的 USB 通信、USB-PD / Type-C 通信链路、可选 CC 下拉（Rd）网络、USBPD 降压电源与接口保护，PD 输入**最大支持 28 V（PD 3.1 EPR）**；同时配有 4 颗 WS2812（验证 PIOC）、INA226 与 OLED 插座（验证 I2C）以及两线调试接口，并将其余可用引脚引出，用于验证 CH32X035 的片上外设。
@@ -115,19 +119,17 @@ git clone https://github.com/TKWTL/CH32X035_DemoBoard.git
 
 ```text
 === CH32X035 custom dev-board demo / coroOS ===
-[RESET] cause: POR/PDR PIN SW
+[RESET] cause: POR/PDR SW
 SystemClk:48000000 Hz
 ChipID:03510611
 UART1: PB10 TX / PB11 RX @ 921600, DMA async, TX/RX 256B
 [BOARD] PD Sink front-end enabled
-[I2C] I2C1 PA10/PA11 @ 400kHz, DMA1 CH6 TX / CH7 RX; async clients scheduled
+[I2C] I2C1 PA10/PA11 @ 400kHz, DMA1 CH6 TX / CH7 RX; interrupt-driven engine
 [WS2812] ready: PIOC IO0 -> PC7, 4 LEDs; held off until PD power stable
-[PD] Sink started; SPR <= 20000 mV, EPR target 28000 mV / max 5000 mA
+[PD] Sink started; SPR <= 20000 mV, EPR target 28000 mV / request ceiling 7000 mA
 [PD] EPR Sink Operational PDP=140 W; status=PD WAIT, waiting for CC attach
 
 [INA226] detected async: MFR=0x5449 DIE=0x2260, I2C=400kHz DMA RX/TX
-CC2 SRC Connect
-[SSD1306] online at 0x3c; 5+5 slot PDO dashboard, MiaoUI h12w6 font
 [PD] SPR Request PDO5: 20000 mV, 5000 mA, EPR-capable RDO
 
 [PD] Source_Capabilities: 6 PDO(s); fixed-request policy max 20000 mV:
@@ -138,8 +140,11 @@ CC2 SRC Connect
   PDO5 raw=000641f4 FIXED 20000 mV 5000 mA  <REQUEST>
   PDO6 raw=c9a43264 PPS_APDO 5000-21000 mV, 5000 mA (not requested)
 [PD] Source advertises EPR capability; establish SPR contract first
+[SSD1306] online at 0x3c; 5+5 slot PDO dashboard, MiaoUI h12w6 font
 [PD] SPR contract ready: PDO5, 20000 mV / 5000 mA
-[PD] EPR Mode: sending Enter, Sink PDP=140 W
+[PD] Get_Source_Cap_Extended sent; selecting adaptive EPR Enter PDP
+[PD] Source_Cap_Ext: EPR Source PDP=140 W -> Enter PDP=140 W
+[PD] EPR Mode: sending Enter, Sink PDP=140 W (adaptive Source PDP)
 [PD] EPR Mode: Enter Acknowledged
 [PD] EPR Mode: Enter Succeeded
 [PD] EPR_Source_Capabilities: 9 PDO slots (36 bytes)
@@ -156,13 +161,7 @@ CC2 SRC Connect
 [PD] EPR contract ready: PDO8, 28000 mV / 5000 mA
 [PD] EPR KeepAlive period=375 ms
 [WS2812] PD power stable; chase/fade enabled
-[INA226] VBUS=28003.750 mV, VSHUNT=+70.0 uV, I=+7.00 mA
-[INA226] VBUS=28007.500 mV, VSHUNT=+75.0 uV, I=+7.50 mA
-[INA226] VBUS=28005.000 mV, VSHUNT=+67.5 uV, I=+6.75 mA
-[INA226] VBUS=28002.500 mV, VSHUNT=+75.0 uV, I=+7.50 mA
-[INA226] VBUS=28006.250 mV, VSHUNT=+70.0 uV, I=+7.00 mA
-[INA226] VBUS=28008.750 mV, VSHUNT=+75.0 uV, I=+7.50 mA
-[INA226] VBUS=28007.500 mV, VSHUNT=+67.5 uV, I=+6.75 mA
+[INA226] VBUS=28008.750 mV, VSHUNT=+82.5 uV, I=+8.25 mA
 ```
 
 上面对应的 OLED 仪表盘（`EPR READY`；右列 PDO 按 AVS > EPR > PPS > SPR 顺序显示）：

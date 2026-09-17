@@ -340,7 +340,7 @@
 		"address": "0x08000000",
 		"target_path": "Project/obj/CH32X035_DemoBoard.hex",
 		"clkSpeed": "High",
-		"debug_interface_mode": "1-wire serial",
+		"debug_interface_mode": "",
 		"erase": true,
 		"program": true,
 		"verify": true,
@@ -362,11 +362,11 @@
 			"telnetport": 4444,
 			"tclport": 6666,
 			"configOptions": [
-				"-f \"${WCH:OpenOCD:default}/bin/wch-riscv.cfg\" -c noload"
+				"-f \"${WCH:OpenOCD:default}/bin/wch-riscv.cfg\""
 			],
 			"host": "127.0.0.1",
 			"port": 3333,
-			"skipDownloadBeforeDebug": true,
+			"skipDownloadBeforeDebug": false,
 			"enablePageEraser": false,
 			"enableNoZeroWaitingAreaFlash": false
 		},
@@ -404,7 +404,7 @@
 				"runReset": true,
 				"runResetType": "halt",
 				"additionalCommands": [],
-				"setBreakAt": "main",
+				"setBreakAt": "handle_reset",
 				"continue": true,
 				"setBreak": true,
 				"setProgramCounter": false,

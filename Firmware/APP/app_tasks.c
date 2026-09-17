@@ -206,7 +206,7 @@ static void APP_DrawSSD1306Dashboard(void)
     //u8g2_DrawVLine(u8g2, 64u, 0u, 64u);
 
     /* Left slot 0: compact inverted welcome banner. */
-    u8g2_DrawBox(u8g2, 8u, 2u, 48u, 8u);
+    u8g2_DrawBox(u8g2, 7u, 2u, 49u, 8u);
     u8g2_SetDrawColor(u8g2, 0u);
     u8g2_DrawStr(u8g2, 8u, baseline[0], "CH32X035");
     u8g2_SetDrawColor(u8g2, 1u);
